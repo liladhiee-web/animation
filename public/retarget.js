@@ -447,7 +447,12 @@ export function blendSnapshots(qa, pa, qb, pb, a, out) {
 }
 
 /** Bake a Track into a THREE.AnimationClip (local quats + hips local position). */
-export function trackToClip(rig, track, name) {
+export function trackToClip(a, b, name = 'Take') {
+  const rig = a?.order ? a : b;
+  const track = a?.times ? a : b;
+  if (!track?.times || !rig?.order) {
+    throw new Error('trackToClip requires both rig and track');
+  }
   const times = Float32Array.from(track.times.map((t) => t - track.times[0]));
   const tracks = rig.order.map((bone, bi) => {
     const v = new Float32Array(times.length * 4);
@@ -457,7 +462,9 @@ export function trackToClip(rig, track, name) {
   const pos = new Float32Array(times.length * 3);
   const parentInv = new THREE.Matrix4();
   rig.reset();
-  parentInv.copy(rig.hips.parent.matrixWorld).invert();
+  if (rig.hips.parent) {
+    parentInv.copy(rig.hips.parent.matrixWorld).invert();
+  }
   track.p.forEach((p, f) => _v1.fromArray(p).applyMatrix4(parentInv).toArray(pos, f * 3));
   tracks.push(new THREE.VectorKeyframeTrack(`${rig.hips.name}.position`, times, pos));
   return new THREE.AnimationClip(name, times[times.length - 1] || 0, tracks);

@@ -831,7 +831,7 @@ async function exportTakeGlb(take) {
     return;
   }
 
-  const clip = trackToClip(track, rig, take.prompt);
+  const clip = trackToClip(rig, track, take.prompt);
   const root = onStage ? cast[onStage].root : model;
   const prevPose = rig.snapshot();
   rig.reset();
