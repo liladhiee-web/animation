@@ -49,11 +49,13 @@ const VIDEO_MODELS = {
 };
 const IMAGE_MODEL = 'fal-ai/flux/schnell';
 
-async function falRun(model, input) {
+async function falRun(model, input, keyOverride) {
   const t0 = performance.now();
+  const key = keyOverride || FAL_KEY;
+  if (!key) throw Object.assign(new Error('FAL_KEY is not set. Please provide it in Settings or .env'), { status: 401 });
   const res = await fetch(`https://fal.run/${model}`, {
     method: 'POST',
-    headers: { Authorization: `Key ${FAL_KEY}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Key ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(input),
   });
   const text = await res.text();
@@ -77,40 +79,99 @@ function readJson(req) {
 }
 
 function send(res, status, body) {
-  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': '*',
+  });
   res.end(JSON.stringify(body));
 }
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css',
   '.json': 'application/json', '.glb': 'model/gltf-binary', '.png': 'image/png', '.svg': 'image/svg+xml',
+  '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.woff2': 'font/woff2',
 };
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
+
+  // Handle CORS Preflight
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': '*',
+    });
+    return res.end();
+  }
+
+  const clientFalKey = req.headers['x-fal-key'] || (req.headers.authorization || '').replace(/^Bearer\s+|^Key\s+/i, '');
+
   try {
+    // System telemetry endpoint
+    if (url.pathname === '/api/system') {
+      let tunnelUrl = process.env.TUNNEL_URL || '';
+      const tunnelFile = path.join(ROOT, '.tunnel_url');
+      if (!tunnelUrl && fs.existsSync(tunnelFile)) {
+        try { tunnelUrl = fs.readFileSync(tunnelFile, 'utf8').trim(); } catch {}
+      }
+      let workerOk = false;
+      try {
+        const r = await fetch(`${HQ_URL}/health`, { signal: AbortSignal.timeout(1000) });
+        const j = await r.json();
+        workerOk = !!j.ok;
+      } catch {}
+      return send(res, 200, {
+        status: 'online',
+        tunnel_url: tunnelUrl,
+        worker_ready: workerOk,
+        has_fal_key: !!(FAL_KEY || clientFalKey),
+        platform: process.platform,
+        node_version: process.version,
+      });
+    }
+
+    // Video generation proxy
     if (req.method === 'POST' && url.pathname === '/api/video') {
       const b = await readJson(req);
+      const falKey = clientFalKey || b.fal_key || FAL_KEY;
       const model = VIDEO_MODELS[b.model] ? b.model : 'h3';
       const mode = b.image_url ? 'i2v' : 't2v';
       const input = { prompt: String(b.prompt || '').slice(0, 4000), ...VIDEO_MODELS[model].input(b, mode === 'i2v') };
       if (b.seed != null && b.seed !== '') input.seed = Number(b.seed);
       if (mode === 'i2v') input.image_url = b.image_url;
-      const out = await falRun(VIDEO_MODELS[model][mode], input);
+      const out = await falRun(VIDEO_MODELS[model][mode], input, falKey);
       console.log(`[video] ${model} ${mode} ${input.duration}s ${input.resolution} in ${out._elapsed.toFixed(1)}s (gpu ${out.timings?.inference?.toFixed?.(2) ?? '?'}s)`);
       return send(res, 200, { model, mode, video_url: out.video?.url, timings: out.timings, elapsed: out._elapsed });
     }
 
+    // Image generation proxy
     if (req.method === 'POST' && url.pathname === '/api/image') {
       const b = await readJson(req);
+      const falKey = clientFalKey || b.fal_key || FAL_KEY;
       const out = await falRun(IMAGE_MODEL, {
         prompt: String(b.prompt || '').slice(0, 4000),
         image_size: b.image_size || 'landscape_16_9',
         num_inference_steps: 4,
         enable_safety_checker: true,
-      });
+      }, falKey);
       console.log(`[image] in ${out._elapsed.toFixed(1)}s`);
       return send(res, 200, { image_url: out.images?.[0]?.url, elapsed: out._elapsed });
+    }
+
+    // File upload endpoint for direct video inputs
+    if (req.method === 'POST' && url.pathname === '/api/upload') {
+      const filename = (url.searchParams.get('name') || `upload_${Date.now()}.mp4`).replace(/[^a-z0-9_.-]+/gi, '_');
+      const uploadDir = path.join(TAKES, 'uploads');
+      fs.mkdirSync(uploadDir, { recursive: true });
+      const dest = path.join(uploadDir, filename);
+      const writeStream = fs.createWriteStream(dest);
+      for await (const chunk of req) writeStream.write(chunk);
+      writeStream.end();
+      console.log(`[upload] saved takes/uploads/${filename}`);
+      return send(res, 200, { ok: true, video_url: `/takes/uploads/${filename}`, filename });
     }
 
     // Save an exported take (GLB body, ?name=…&source=<video url>) into ./takes for the Blender renderer.
@@ -140,10 +201,29 @@ const server = http.createServer(async (req, res) => {
         body: JSON.stringify({ video_url: b.video_url, ...(b.hands ? { hands: b.hands } : {}) }),
       });
       const text = await r.text();
-      res.writeHead(r.status, { 'Content-Type': 'application/json' });
+      res.writeHead(r.status, {
+        'Content-Type': 'application/json',
+        'Access-Control-Allow-Origin': '*',
+      });
       return res.end(text);
     }
 
+    // Serve static files from takes/ directory
+    if (req.method === 'GET' && url.pathname.startsWith('/takes/')) {
+      const sub = decodeURIComponent(url.pathname.slice('/takes/'.length));
+      const file = path.normalize(path.join(TAKES, sub));
+      if (!file.startsWith(TAKES) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+        res.writeHead(404); return res.end('take not found');
+      }
+      res.writeHead(200, {
+        'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-cache',
+      });
+      return fs.createReadStream(file).pipe(res);
+    }
+
+    // Serve static files from public/ directory
     if (req.method === 'GET') {
       let p = decodeURIComponent(url.pathname);
       if (p === '/') p = '/index.html';
@@ -151,7 +231,11 @@ const server = http.createServer(async (req, res) => {
       if (!file.startsWith(PUBLIC) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
         res.writeHead(404); return res.end('not found');
       }
-      res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+      res.writeHead(200, {
+        'Content-Type': MIME[path.extname(file)] || 'application/octet-stream',
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-cache',
+      });
       return fs.createReadStream(file).pipe(res);
     }
 
@@ -163,3 +247,4 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => console.log(`Prompt2Rig → http://localhost:${PORT}`));
+

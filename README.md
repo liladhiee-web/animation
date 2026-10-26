@@ -58,16 +58,40 @@ forearms. WiLoR adds the palm and all 15 finger joints per hand.
 
 ## Quick start
 
-**Needs:** Node 18+ and a [fal](https://fal.ai) API key. For the HQ pass: Windows, an NVIDIA GPU,
-[`uv`](https://docs.astral.sh/uv/) and `ffmpeg` on PATH.
+### Option A: 1-Click on Kaggle (Free GPU + Cloudflare Tunnel)
+
+Run Prompt2Rig on a free Kaggle NVIDIA GPU (T4 / P100) with instant public access via Cloudflare Tunnel:
+
+1. Open or upload [`prompt2rig_kaggle.ipynb`](file:///c:/Users/lilad/OneDrive/Documents/animation/prompt2rig_kaggle.ipynb) to [Kaggle](https://www.kaggle.com).
+2. Set **Accelerator** to **GPU T4** and toggle **Internet ON** in the Kaggle sidebar.
+3. Run the notebook cells, or execute from the terminal:
+```bash
+python kaggle_run.py
+```
+`kaggle_run.py` automatically checks your GPU, downloads the required body & hand models (SMPL-X, WiLoR, MANO), launches the unified server, connects a Cloudflare Tunnel, and displays a clickable public `https://*.trycloudflare.com` link right in the notebook!
+
+---
+
+### Option B: Local Machine
+
+**Needs:** Python 3.10+ (or Node 18+) and an NVIDIA GPU for the HQ pass.
 
 ```bash
-git clone https://github.com/blendi-remade/prompt2rig && cd prompt2rig
-cp .env.example .env          # add your FAL_KEY
-node server.mjs               # → http://localhost:5177 (the live preview works now)
+git clone https://github.com/liladhiee-web/animation.git && cd animation
+cp .env.example .env          # add your FAL_KEY (or enter it in the web UI Settings)
 ```
 
-**HQ pass (recommended):**
+**Run Unified Python Server (Recommended):**
+```bash
+python server.py              # → http://localhost:5177 (Serves UI + GPU worker in-process)
+```
+
+**Or Run with Node.js:**
+```bash
+node server.mjs               # → http://localhost:5177
+```
+
+**HQ pass setup (for local GPU):**
 
 ```powershell
 hq\setup.ps1                  # venv, CUDA PyTorch, GVHMR + ~5 GB of checkpoints

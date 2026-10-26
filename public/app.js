@@ -1,5 +1,7 @@
-// Prompt2Rig — prompt → H3 Max Turbo video → live pose (MediaPipe) → Mixamo rig,
-// with an optional GVHMR "HQ" pass on the local GPU that swaps in when ready.
+// Prompt2Rig — Modern Cyber-Studio Frontend
+// Prompt → H3 Max Turbo / FLUX 3 Max video → live pose (MediaPipe) → Mixamo rig,
+// with GVHMR 3D body + WiLoR finger motion on GPU (Kaggle / Local) that swaps in when ready.
+
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
@@ -9,14 +11,16 @@ import { createStage } from './stage.js';
 import { HAND_LIMITS, Rig, OneEuro, Track, trackToClip, blendSnapshots, smplGlobals, aaToQuat } from './retarget.js';
 
 const $ = (s) => document.querySelector(s);
-// Mixamo-rigged characters from the three.js examples (loaded from the CDN, not redistributed here).
+const $$ = (s) => document.querySelectorAll(s);
+
+// Mixamo-rigged characters loaded from three.js CDN
 const THREE_MODELS = 'https://cdn.jsdelivr.net/gh/mrdoob/three.js@r169/examples/models/gltf/';
 const CHARACTERS = {
   xbot: { name: 'X Bot', url: THREE_MODELS + 'Xbot.glb' },
   michelle: { name: 'Michelle', url: THREE_MODELS + 'Michelle.glb' },
   soldier: { name: 'Soldier', url: THREE_MODELS + 'Soldier.glb' },
 };
-const VIDEO_MODEL_LABEL = { h3: 'h3 max turbo', flux3: 'flux 3 max' };
+const VIDEO_MODEL_LABEL = { h3: 'H3 Max Turbo', flux3: 'FLUX 3 Max' };
 const MP_WASM = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm';
 const MP_MODEL = (v) => `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_${v}/float16/latest/pose_landmarker_${v}.task`;
 
@@ -26,46 +30,61 @@ const PERFORMER_PROMPT =
   'with empty space above the head and below the feet, the person is centered. Plain seamless ' +
   'light-grey studio backdrop and floor, flat even soft lighting, sharp focus, 35mm photo.';
 
-// Presets chosen to retarget cleanly: facing the camera, limbs clearly separated from the body.
-// Avoid flips, spins, floor work and arms crossing/hiding behind the torso — pose estimators
-// lose track of which limb is which, and the error shows on the rig.
 const PRESETS = [
   'does an energetic hip hop dance with wide, open arm movements',
   'throws boxing jabs and hooks toward the camera',
-  'does jumping jacks',
-  'mimes a full golf swing',
-  'shoots an imaginary basketball jump shot',
+  'does a fast martial arts combo: two punches, a front kick, then a roundhouse kick',
+  'does a Michael Jackson style dance with sharp kicks and a dramatic final pose',
   'celebrates a victory, jumping and pumping both fists in the air',
-  'does a stiff zombie walk in place with arms stretched forward',
-  'does a karate kata with straight punches and front kicks',
-  'waves hello with both arms, then takes a bow',
-  'does a big superhero landing pose, then stands up proudly',
+  'does a powerful kung fu form with deep horse stances and a crane kick',
+  'does star jumps, then a big tuck jump with knees to the chest',
+  'does a sword fighting routine with big slashes, thrusts and a lunge',
+  'plays a wild air guitar solo, jumping and headbanging',
+  'does a superhero power-up: crouches low, then explodes upward with fists raised',
+];
+
+const DYNAMIC_PROMPTS = [
+  'does an explosive hip hop routine with jumps, kicks and big arm swings',
+  'does a fast martial arts combo: two punches, a front kick, then a high roundhouse kick',
+  'does a celebratory touchdown dance with a ball spike and a shimmy',
+  'does an Irish step dance with fast kicking footwork and arms held straight down',
+  'does a karate sequence: front kick, side kick, then a jumping punch',
+  'does boxing footwork, bobbing and weaving, then a fast flurry of hooks and uppercuts',
+  'does a high-energy aerobics routine with punches, side steps and knee lifts',
+  'does a haka-style war dance with stomps, chest slaps and wide powerful stances',
+  'does a breakdance toprock with quick crossing footwork, staying on their feet',
+  'does a ballet sequence: plié, relevé, then an arabesque with one leg extended back',
+  'does a powerful kung fu form with deep horse stances, palm strikes and a crane kick',
+  'does a squat kick dance, alternating legs kicking out from a deep squat',
+  'does a superhero power-up: crouches low, then explodes upward with fists raised',
+  'dances the Charleston with swinging arms and kicking feet',
+  'does a Matrix-style slow-motion dodge, leaning far back',
+  'does a gymnastics finish: arms up, a jump with a half turn, then a big salute',
 ];
 
 const IDLE_PROMPT = 'stands in place in a relaxed idle pose, breathing and gently shifting weight from foot to foot';
 const MAX_IDLE_STREAK = 3;
-// Stream mode = continue-from-last-frame + play only once HQ is ready + idle between prompts.
 const chainOn = () => settings.chain || settings.stream;
 const waitOn = () => settings.hq && hqOnline && (settings.waitHq || settings.stream);
 
-// Shared staging that keeps clips easy to read for pose estimation.
 const STAGING = 'They stay roughly in place facing the camera, with both arms clearly visible and held away from the torso, no turning around, no flips. ' +
   'Their entire body, including both feet, stays visible in frame the whole time. Static locked-off camera, no camera movement, no zoom, no cuts.';
 const videoPrompt = (action, fromImage) => fromImage
   ? `The person ${action}. ${STAGING} Plain studio background.`
   : `Wide full-body shot of one person wearing a plain grey t-shirt and dark pants in an empty light-grey studio. The person ${action}. ${STAGING}`;
 
-// ---- settings ------------------------------------------------------------------
+// ---- Settings ------------------------------------------------------------------
 const DEFAULTS = {
   stream: false, source: 'performer', chain: false, duration: 5, resolution: '480P', hq: true, waitHq: false,
   rootMotion: true, poseModel: 'heavy', smoothing: 0.5, showSkel: true, orientation: 'portrait', performerUrls: {},
-  character: 'xbot', videoModel: 'h3', swap: false, cinematic: false, hands: true,
+  character: 'xbot', videoModel: 'h3', swap: false, cinematic: false, hands: true, falKey: '', lightingTheme: 'cyber',
 };
 const settings = (() => { try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('p2r') || '{}') }; } catch { return { ...DEFAULTS }; } })();
 const save = () => { try { localStorage.setItem('p2r', JSON.stringify(settings)); } catch {} };
 
 function bindSetting(id, kind = 'value', onChange) {
   const el = $('#' + id);
+  if (!el) return;
   if (kind === 'checked') el.checked = !!settings[id]; else el.value = settings[id];
   el.addEventListener('input', () => {
     settings[id] = kind === 'checked' ? el.checked : (el.type === 'range' ? Number(el.value) : el.value);
@@ -74,40 +93,62 @@ function bindSetting(id, kind = 'value', onChange) {
   onChange?.(settings[id]);
 }
 
-// ---- log / status -------------------------------------------------------------
+// ---- Log / Banner Helpers ------------------------------------------------------
 function log(msg, cls = '') {
-  const el = $('#log'); const line = document.createElement('div');
-  if (cls) line.className = cls;
-  line.textContent = `${new Date().toLocaleTimeString([], { hour12: false })}  ${msg}`;
-  el.appendChild(line); el.scrollTop = el.scrollHeight;
+  const el = $('#log');
+  if (!el) return;
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  const timeStr = new Date().toLocaleTimeString([], { hour12: false });
+  entry.innerHTML = `<span class="log-time">${timeStr}</span><span class="log-msg ${cls}">${msg}</span>`;
+  el.appendChild(entry);
+  el.scrollTop = el.scrollHeight;
 }
-function pill(id, text, state) { const p = $('#pill-' + id); p.textContent = text; p.className = 'pill ' + (state || ''); }
-function banner(text) { const b = $('#banner'); b.textContent = text || ''; b.classList.toggle('on', !!text); }
 
+function banner(text) {
+  const b = $('#banner');
+  if (!b) return;
+  b.textContent = text || '';
+  b.classList.toggle('show', !!text);
+}
+
+// API request helper with X-Fal-Key header
 async function api(path, body) {
-  const res = await fetch(path, { method: body ? 'POST' : 'GET', headers: { 'Content-Type': 'application/json' }, body: body && JSON.stringify(body) });
+  const headers = { 'Content-Type': 'application/json' };
+  if (settings.falKey) headers['X-Fal-Key'] = settings.falKey;
+  const res = await fetch(path, {
+    method: body ? 'POST' : 'GET',
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || `${path} → ${res.status}`);
+  if (!res.ok) throw new Error(json.detail || json.error || `${path} → ${res.status}`);
   return json;
 }
 
-// ---- three.js stage -------------------------------------------------------------
+// ---- 3D Stage Setup ------------------------------------------------------------
 const stage = createStage($('#stage'));
 const { scene } = stage;
-// Keep the characters centered in the part of the stage the video panel doesn't cover.
-new ResizeObserver(() => { const v = $('#vidwrap'); stage.setInset(v.offsetLeft + v.offsetWidth); }).observe($('#vidwrap'));
 
-// ---- character --------------------------------------------------------------------
+// Apply initial lighting theme
+stage.setLightingTheme(settings.lightingTheme || 'cyber');
+
+// Keep characters centered when video PIP resizes
+new ResizeObserver(() => {
+  const v = $('#vidwrap');
+  if (v) stage.setInset(v.offsetLeft + v.offsetWidth);
+}).observe($('#vidwrap'));
+
+// ---- Character Management ------------------------------------------------------
 let model = null, rig = null;
 
-/** Load a Mixamo character: scaled to meters, facing +Z, centered with feet on y=0. */
 async function loadModel(src, name) {
   const isFbx = /\.fbx$/i.test(name);
   const obj = await (isFbx ? new FBXLoader() : new GLTFLoader()).loadAsync(src);
   const root = isFbx ? obj : obj.scene;
-  if (isFbx) root.scale.setScalar(0.01);         // Mixamo FBX is in centimeters
+  if (isFbx) root.scale.setScalar(0.01);
   root.updateMatrixWorld(true);
-  // Retargeting assumes the character faces +Z (toward the camera); some exports face -Z.
+
   const armX = (side) => {
     let b; root.traverse((o) => { if (!b && o.isBone && o.name.replace(/^mixamorig\d*[:_]?/i, '') === side + 'Arm') b = o; });
     return b?.getWorldPosition(new THREE.Vector3()).x;
@@ -118,210 +159,254 @@ async function loadModel(src, name) {
   root.position.y -= box.min.y;
   root.position.x -= (box.min.x + box.max.x) / 2;
   root.position.z -= (box.min.z + box.max.z) / 2;
-  root.traverse((o) => { if (o.isMesh) { o.castShadow = true; o.frustumCulled = false; } });
-  root.updateMatrixWorld(true);
-  return root;
+  root.traverse((o) => {
+    if (o.isMesh) {
+      o.castShadow = true; o.receiveShadow = true;
+      if (o.material) o.material.roughness = Math.max(o.material.roughness, 0.45);
+    }
+  });
+  return { root, rig: new Rig(root) };
 }
 
-async function loadCharacter(src, name = 'X Bot') {
-  pill('rig', 'loading ' + name.toLowerCase(), 'busy');
-  const root = await loadModel(src, name);
-  root.name = 'Character';
-  const newRig = new Rig(root);
-  if (model) { scene.remove(model); stage.removeContactShadow(model); }
-  scene.add(root); stage.contactShadow(root); model = root; rig = newRig;
-  // Takes store bone-order-specific data; re-bake HQ data for the new skeleton.
-  for (const t of takes) { t.live = new Track(rig.order.length); t.liveDone = false; if (t.hqRaw) t.hq = bakeSmpl(t.hqRaw); }
-  liveState ||= { hip0: null, baseY: null, mpp: null, scale: null };
-  liveSnap = null; switchFrom = null;
-  pill('rig', name.toLowerCase(), 'ok');
-  log(`character: ${name} (${rig.order.length} bones, ${rig.height.toFixed(2)} m)`);
-  resetCast();
-}
+const cast = {};
+let onStage = null;
 
-// ---- character swap: one character at a time, the next one takes over on every loop -------------
-// The selected character stays the hidden "driver" that takes are baked for; whichever character
-// is on stage copies its pose each frame, so swapping never needs a re-bake.
-const cast = {};        // key → { model, rig } for the non-driver characters, loaded on demand
-let onStage = null;     // key of the character currently visible (null = the driver itself)
-
-function resetCast() {
-  for (const k of Object.keys(cast)) { scene.remove(cast[k].model); stage.removeContactShadow(cast[k].model); delete cast[k]; }
-  onStage = null;
-  if (model) model.visible = true;
-}
-
-async function swapCharacter() {
-  const keys = Object.keys(CHARACTERS);
-  const shown = onStage || settings.character;
-  const next = keys[(keys.indexOf(shown) + 1) % keys.length];
-  if (next === settings.character) { showOnStage(null); return; }
-  if (!cast[next]) {
-    const m = await loadModel(CHARACTERS[next].url, CHARACTERS[next].name);
-    if (cast[next]) return;
-    m.visible = false; scene.add(m);
-    cast[next] = { model: m, rig: new Rig(m) };
-  }
-  showOnStage(next);
+async function ensureCast(key) {
+  if (cast[key]) return cast[key];
+  const char = CHARACTERS[key];
+  if (!char) throw new Error('unknown character: ' + key);
+  const loaded = await loadModel(char.url, char.name);
+  loaded.root.visible = false;
+  scene.add(loaded.root);
+  stage.contactShadow(loaded.root);
+  cast[key] = loaded;
+  return loaded;
 }
 
 function showOnStage(key) {
-  if (onStage && cast[onStage]) { cast[onStage].model.visible = false; stage.removeContactShadow(cast[onStage].model); }
+  if (!key) {
+    for (const [k, c] of Object.entries(cast)) c.root.visible = false;
+    if (model) { model.visible = true; rig.visible = true; }
+    onStage = null; return;
+  }
+  for (const [k, c] of Object.entries(cast)) c.root.visible = k === key;
+  if (model) model.visible = false;
   onStage = key;
-  model.visible = !key;
-  stage.removeContactShadow(model);
-  if (key) { cast[key].model.visible = true; stage.contactShadow(cast[key].model); }
-  else stage.contactShadow(model);
-  pill('rig', (key ? CHARACTERS[key].name : (CHARACTERS[settings.character]?.name || 'character')).toLowerCase(), 'ok');
 }
 
-// ---- MediaPipe ---------------------------------------------------------------------
-let landmarker = null, vision = null, mpTs = 0;
-async function initPose(variant) {
-  pill('pose', 'pose: loading ' + variant, 'busy');
-  vision ||= await FilesetResolver.forVisionTasks(MP_WASM);
-  const make = (delegate) => PoseLandmarker.createFromOptions(vision, {
-    baseOptions: { modelAssetPath: MP_MODEL(variant), delegate },
-    runningMode: 'VIDEO', numPoses: 1,
-    minPoseDetectionConfidence: 0.5, minPosePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+const CHAR_ORDER = ['xbot', 'michelle', 'soldier'];
+async function swapCharacter() {
+  const currentKey = onStage || settings.character;
+  const nextKey = CHAR_ORDER[(CHAR_ORDER.indexOf(currentKey) + 1) % CHAR_ORDER.length];
+  await ensureCast(nextKey);
+  const fromRig = onStage ? cast[onStage].rig : rig;
+  const toRig = cast[nextKey].rig;
+  toRig.copyPoseFrom(fromRig);
+  showOnStage(nextKey);
+  $('#pill-rig-text').textContent = `Rig: ${CHARACTERS[nextKey].name}`;
+}
+
+async function loadCharacter(src, name) {
+  const loaded = await loadModel(src, name);
+  if (model) { scene.remove(model); stage.removeContactShadow(model); }
+  model = loaded.root; rig = loaded.rig;
+  scene.add(model);
+  stage.contactShadow(model);
+  stage.setFraming(1.4);
+  showOnStage(null);
+  $('#pill-rig-text').textContent = `Rig: ${name.replace(/\.[^.]+$/, '')}`;
+  log(`Loaded character ${name}`, 'ok');
+}
+
+// ---- Pose Detection Setup (MediaPipe) -------------------------------------------
+let vision = null, landmarker = null;
+let mpTs = 0;
+
+async function initPose(modelVariant = 'heavy') {
+  if (!vision) vision = await FilesetResolver.forVisionTasks(MP_WASM);
+  landmarker = await PoseLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: MP_MODEL(modelVariant), delegate: 'GPU' },
+    runningMode: 'VIDEO',
+    numPoses: 1,
+    minPoseDetectionConfidence: 0.5,
+    minPosePresenceConfidence: 0.5,
+    minTrackingConfidence: 0.5,
   });
-  const old = landmarker; landmarker = null;
-  try { landmarker = await make('GPU'); } catch (e) { log('GPU delegate failed, using CPU: ' + e.message, 'err'); landmarker = await make('CPU'); }
-  old?.close();
-  pill('pose', 'pose: ' + variant, 'ok');
+  log(`MediaPipe Pose loaded (${modelVariant})`, 'ok');
 }
 
-// ---- takes --------------------------------------------------------------------------
+// ---- Takes Management ----------------------------------------------------------
 let takeSeq = 0;
-const takes = [];
 class Take {
   constructor(prompt) {
-    this.id = ++takeSeq; this.prompt = prompt;
-    this.videoUrl = null; this.status = 'generating';
-    this.live = null; this.liveDone = false;
-    this.hq = null; this.hqRaw = null; this.hqStatus = 'off'; this.hqAt = 0;
-    this.rootOffset = null; this.timings = {};
-    this.ready = new Promise((r) => (this._resolveReady = r));
+    this.id = ++takeSeq;
+    this.prompt = prompt;
+    this.status = 'queued';
+    this.videoUrl = null;
+    this.lastFrame = null;
+    this.live = null;
+    this.liveDone = false;
+    this.hq = null;
+    this.hqStatus = 'idle';
+    this.hqAt = 0;
+    this.timings = {};
+    this.handsMethod = settings.hands ? 'wilor' : 'off';
+    this.started = false;
   }
-  get best() { return this.hq || (this.liveDone ? this.live : null); }
 }
+
+const takes = [];
 
 function renderTakes() {
-  const el = $('#takes'); el.innerHTML = '';
-  for (const t of [...takes].reverse()) {
+  const drawer = $('#takes');
+  if (!drawer) return;
+  const cards = drawer.querySelectorAll('.take-card');
+  cards.forEach((c) => c.remove());
+
+  takes.slice().reverse().forEach((take) => {
     const card = document.createElement('div');
-    card.className = 'take' + (t === current ? ' playing' : '');
-    const gen = t.status === 'generating' ? '<span class="pill busy">generating</span>'
-      : t.status === 'error' ? '<span class="pill bad">failed</span>'
-      : t.status === 'skipped' ? '<span class="pill">skipped</span>'
-      : t.timings.gen ? `<span class="pill">${t.timings.gen.toFixed(1)}s gen</span>` : '';
-    const live = t.liveDone ? '<span class="pill">live</span>' : '';
-    const hq = { running: '<span class="pill busy">hq</span>', done: `<span class="pill ok">hq ${t.timings.hq?.toFixed(1)}s</span>`, error: '<span class="pill bad">hq failed</span>' }[t.hqStatus] || '';
-    card.innerHTML = `<div class="p" title="${escapeHtml(t.prompt)}">#${t.id} · ${t.auto ? '<i style="color:var(--dim)">idle</i> · ' : ''}${escapeHtml(t.prompt)}</div>
-      <div class="meta">${gen}${live}${hq}</div>
-      <div class="actions"><button class="btn" data-a="play" ${t.videoUrl ? '' : 'disabled'}>▶ play</button>
-      <button class="btn" data-a="glb" ${t.best ? '' : 'disabled'}>↓ glb</button></div>`;
-    card.querySelector('[data-a=play]').onclick = () => playTake(t);
-    card.querySelector('[data-a=glb]').onclick = () => exportTake(t);
-    el.appendChild(card);
-  }
-}
-const escapeHtml = (s) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    card.className = 'take-card' + (current === take ? ' playing' : '');
+    const isHqReady = take.hqStatus === 'done';
+    const isRunningHq = take.hqStatus === 'running';
 
-// ---- generation ------------------------------------------------------------------------
-let genChain = Promise.resolve();
-let lastGenerated = null;
+    const statusTag = isHqReady
+      ? `<span class="take-status-tag hq-ready">HQ READY</span>`
+      : isRunningHq
+      ? `<span class="take-status-tag running">HQ RUNNING...</span>`
+      : `<span class="take-status-tag live-only">LIVE PREVIEW</span>`;
 
-let idleStreak = 0;
-function submitPrompt(prompt, { auto = false } = {}) {
-  prompt = prompt.trim();
-  if (!prompt) return;
-  if (!auto) {
-    idleStreak = 0;
-    // A real prompt shouldn't wait behind an idle filler that hasn't started playing: drop it,
-    // and chain from the clip before it instead.
-    const idle = lastGenerated;
-    if (settings.stream && idle?.auto && !idle.started && idle !== current && idle.status === 'ready' && !genBusy) {
-      const qi = queue.indexOf(idle); if (qi >= 0) queue.splice(qi, 1);
-      idle.status = 'skipped'; lastGenerated = idle.prevGenerated;
-      log(`#${idle.id} idle filler skipped for your prompt`);
-    }
-  }
-  const take = new Take(prompt);
-  take.auto = auto;
-  takes.push(take); renderTakes();
-  // Serialized: "continue from last frame" needs the previous clip's final frame.
-  genBusy++;
-  genChain = genChain.then(() => generate(take)).catch(() => {}).finally(() => genBusy--);
-}
-let genBusy = 0;
+    card.innerHTML = `
+      <div class="take-header">
+        <span class="take-id">#${take.id}</span>
+        ${statusTag}
+      </div>
+      <div class="take-prompt">${take.prompt}</div>
+      <div class="take-footer">
+        <span class="take-time">${take.timings.gen ? `${take.timings.gen.toFixed(1)}s gen` : ''}</span>
+        <div class="take-actions">
+          <button class="take-btn" data-action="play">Play</button>
+          <button class="take-btn" data-action="glb" title="Export 3D Animation (GLB)">↓ GLB</button>
+        </div>
+      </div>
+    `;
 
-/** Stream mode: keep one clip in the pipeline so the performer never freezes for long. */
-function maybeIdle() {
-  if (!settings.stream || idleStreak >= MAX_IDLE_STREAK) return;
-  const ahead = queue.length + genBusy + takes.filter((t) => t.status === 'ready' && t.hqStatus === 'running' && !t.started).length;
-  if (ahead === 0) { idleStreak++; submitPrompt(IDLE_PROMPT, { auto: true }); }
+    card.querySelector('[data-action="play"]').onclick = (e) => {
+      e.stopPropagation();
+      playTake(take);
+    };
+    card.querySelector('[data-action="glb"]').onclick = (e) => {
+      e.stopPropagation();
+      exportTakeGlb(take);
+    };
+    card.onclick = () => playTake(take);
+
+    drawer.appendChild(card);
+  });
 }
 
+// ---- Performer Setup -----------------------------------------------------------
 async function ensurePerformer(force = false) {
   const o = settings.orientation;
-  if (settings.performerUrls[o] && !force) return settings.performerUrls[o];
-  banner('creating performer…');
-  const t0 = performance.now();
-  const r = await api('/api/image', { prompt: PERFORMER_PROMPT, image_size: o === 'portrait' ? 'portrait_16_9' : 'landscape_16_9' });
-  settings.performerUrls[o] = r.image_url; save();
+  if (!force && settings.performerUrls[o]) return settings.performerUrls[o];
+  banner('Generating performer reference frame...');
+  log(`Generating performer (${o})...`);
+  const out = await api('/api/image', {
+    prompt: PERFORMER_PROMPT,
+    image_size: o === 'portrait' ? 'portrait_16_9' : 'landscape_16_9',
+  });
+  if (!out.image_url) throw new Error('image generation returned no url');
+  settings.performerUrls[o] = out.image_url;
+  save();
   showPerformer();
-  log(`performer image in ${((performance.now() - t0) / 1000).toFixed(1)}s`, 'ok');
   banner('');
-  return r.image_url;
+  log('Performer reference updated', 'ok');
+  return out.image_url;
 }
 
-async function generate(take) {
-  const t0 = performance.now();
+function showPerformer() {
+  const img = $('#performer-img');
+  if (!img) return;
+  const url = settings.performerUrls[settings.orientation];
+  img.classList.toggle('portrait', settings.orientation === 'portrait');
+  if (url) img.src = url; else img.removeAttribute('src');
+  if (!video.videoWidth) $('#vidwrap')?.classList.toggle('portrait', settings.orientation === 'portrait');
+}
+
+// ---- Video Generation Pipeline -------------------------------------------------
+let genBusy = 0;
+
+async function submitPrompt(prompt) {
+  if (!prompt.trim()) return;
+  const take = new Take(prompt);
+  takes.push(take);
+  renderTakes();
+  const queuePos = genBusy;
+  genBusy++;
+
   try {
-    let image_url = null, from = 'text';
-    if (chainOn() && lastGenerated?.videoUrl) {
-      image_url = await (lastGenerated.lastFrame ||= lastFrameDataUrl(lastGenerated.videoUrl)); from = `take #${lastGenerated.id} last frame`;
-    } else if (settings.source === 'performer') {
-      image_url = await ensurePerformer(); from = 'performer';
+    let imgUrl = null;
+    if (settings.source === 'performer') {
+      const prev = takes[takes.indexOf(take) - 1];
+      if (chainOn() && prev?.lastFrame) {
+        imgUrl = await prev.lastFrame;
+      }
+      if (!imgUrl) imgUrl = await ensurePerformer();
     }
-    banner(`generating #${take.id}…`);
-    log(`#${take.id} → ${VIDEO_MODEL_LABEL[settings.videoModel]} (${from}, ${settings.duration}s ${settings.resolution})`);
-    const r = await api('/api/video', {
-      prompt: videoPrompt(take.prompt, !!image_url), image_url,
-      model: settings.videoModel, duration: settings.duration, resolution: settings.resolution, aspect_ratio: settings.orientation === 'portrait' ? '9:16' : '16:9',
+
+    banner(queuePos ? `Waiting in queue (#${take.id})...` : `#${take.id}: Generating video (${VIDEO_MODEL_LABEL[settings.videoModel] || 'H3'})...`);
+    log(`#${take.id}: Generating video with ${VIDEO_MODEL_LABEL[settings.videoModel] || 'H3'}...`);
+
+    const out = await api('/api/video', {
+      prompt: videoPrompt(prompt, !!imgUrl),
+      model: settings.videoModel,
+      duration: settings.duration,
+      resolution: settings.resolution,
+      aspect_ratio: settings.orientation === 'portrait' ? '9:16' : '16:9',
+      image_url: imgUrl,
     });
-    take.videoUrl = r.video_url; take.status = 'ready';
-    take.timings.gen = (performance.now() - t0) / 1000;
-    log(`#${take.id} video in ${take.timings.gen.toFixed(1)}s (gpu ${r.timings?.inference?.toFixed(2) ?? '?'}s)`, 'ok');
-    take.prevGenerated = lastGenerated;
-    lastGenerated = take;
-    // Grab the final frame now (in parallel with HQ) so the next chained clip can start immediately.
+
+    take.videoUrl = out.video_url;
+    take.status = 'ready';
+    take.timings.gen = out.elapsed;
+    log(`#${take.id} video generated in ${out.elapsed.toFixed(1)}s`, 'ok');
+
     if (chainOn()) take.lastFrame = lastFrameDataUrl(take.videoUrl).catch(() => null);
     banner('');
+
     if (settings.hq && hqOnline) runHQ(take);
     renderTakes();
+
     if (waitOn() && !(settings.stream && held)) {
-      // Normally play only once HQ is ready; if the player starves meanwhile, startStarved()
-      // plays it early with the live preview and HQ cross-fades in when it lands.
       take.awaitingHq = true;
-      if (!current) banner(`#${take.id}: waiting for hq motion…`);
-      take.hqPromise.finally(() => {
+      if (!current) banner(`#${take.id}: Waiting for HQ GPU motion pass...`);
+      take.hqPromise?.finally(() => {
         banner('');
-        if (take.awaitingHq && take.status !== 'skipped') { take.awaitingHq = false; enqueue(take); }
+        if (take.awaitingHq && take.status !== 'skipped') {
+          take.awaitingHq = false;
+          enqueue(take);
+        }
       });
-    } else enqueue(take);
+    } else {
+      enqueue(take);
+    }
   } catch (e) {
-    take.status = 'error'; renderTakes(); banner('');
-    log(`#${take.id} failed: ${e.message}`, 'err');
+    take.status = 'error';
+    renderTakes();
+    banner('');
+    log(`#${take.id} generation failed: ${e.message}`, 'err');
+    if (e.message.includes('FAL_KEY')) {
+      $('#modal-settings').classList.add('open');
+      banner('Please configure your FAL API Key in Settings');
+    }
+  } finally {
+    genBusy = Math.max(0, genBusy - 1);
   }
 }
 
-/** Grab a clip's final frame as a JPEG data URI (first frame for the next clip). */
 async function lastFrameDataUrl(url) {
   const v = document.createElement('video');
   v.crossOrigin = 'anonymous'; v.muted = true; v.preload = 'auto'; v.src = url;
-  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error('cannot load video for last frame')); });
+  await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = () => rej(new Error('cannot load video frame')); });
   v.currentTime = Math.max(0, v.duration - 0.05);
   await new Promise((res) => (v.onseeked = res));
   const c = document.createElement('canvas'); c.width = v.videoWidth; c.height = v.videoHeight;
@@ -330,34 +415,83 @@ async function lastFrameDataUrl(url) {
   return c.toDataURL('image/jpeg', 0.92);
 }
 
-// ---- HQ (GVHMR) --------------------------------------------------------------------------
+// Upload direct local video file
+async function uploadLocalVideo(file) {
+  if (!file) return;
+  banner(`Uploading ${file.name}...`);
+  log(`Uploading video file ${file.name}...`);
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const res = await fetch('/api/upload', { method: 'POST', body: formData });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.detail || 'Upload failed');
+
+    const take = new Take(`(file) ${file.name}`);
+    take.videoUrl = json.video_url;
+    take.status = 'ready';
+    take.timings.gen = 0;
+    takes.push(take);
+    renderTakes();
+    banner('');
+    log(`Video uploaded successfully (${(file.size / (1024*1024)).toFixed(1)} MB)`, 'ok');
+
+    if (settings.hq && hqOnline) runHQ(take);
+    enqueue(take);
+  } catch (e) {
+    banner('');
+    log(`Video upload failed: ${e.message}`, 'err');
+  }
+}
+
+// ---- HQ Motion (GVHMR + WiLoR) ------------------------------------------------
 let hqOnline = false;
+
 async function checkHQ() {
-  try { const r = await api('/api/hq/health'); hqOnline = !!r.ok; pill('hq', r.ok ? `hq · ${(r.device || 'ready').replace(/^NVIDIA GeForce /, '').toLowerCase()}` : 'hq · ' + (r.error || 'not ready'), r.ok ? 'ok' : 'bad'); }
-  catch { hqOnline = false; pill('hq', 'hq worker offline', 'bad'); }
+  try {
+    const r = await api('/api/hq/health');
+    hqOnline = !!r.ok;
+    const dev = (r.device || 'GPU Ready').replace(/^NVIDIA GeForce /, '').toLowerCase();
+    $('#pill-hq-text').textContent = r.ok ? `GVHMR: ${dev}` : `GVHMR: ${r.error ? 'Loading...' : 'Offline'}`;
+    $('#pill-hq').className = `status-pill ${r.ok ? 'active' : 'hq'}`;
+  } catch {
+    hqOnline = false;
+    $('#pill-hq-text').textContent = 'GVHMR: Offline';
+    $('#pill-hq').className = 'status-pill';
+  }
 }
 
 function runHQ(take) {
   const t0 = performance.now();
-  take.hqStatus = 'running'; renderTakes();
-  take.hqPromise = api('/api/hq', { video_url: take.videoUrl, ...(take.handsMethod ? { hands: take.handsMethod } : {}) })
+  take.hqStatus = 'running';
+  renderTakes();
+
+  take.hqPromise = api('/api/hq', {
+    video_url: take.videoUrl,
+    ...(take.handsMethod ? { hands: take.handsMethod } : {}),
+  })
     .then((r) => {
-      take.hqRaw = r; take.hq = bakeSmpl(r); take.hqAt = performance.now();
-      take.hqStatus = 'done'; take.timings.hq = (performance.now() - t0) / 1000;
-      log(`#${take.id} hq motion in ${take.timings.hq.toFixed(1)}s (${r.n} frames, worker ${r.elapsed?.toFixed(1)}s)`, 'hq');
+      take.hqRaw = r;
+      take.hq = bakeSmpl(r);
+      take.hqAt = performance.now();
+      take.hqStatus = 'done';
+      take.timings.hq = (performance.now() - t0) / 1000;
+      log(`#${take.id} HQ motion ready in ${take.timings.hq.toFixed(1)}s (${r.n} frames on ${r.device || 'GPU'})`, 'hq');
     })
-    .catch((e) => { take.hqStatus = 'error'; log(`#${take.id} hq failed: ${e.message}`, 'err'); })
+    .catch((e) => {
+      take.hqStatus = 'error';
+      log(`#${take.id} HQ motion failed: ${e.message}`, 'err');
+    })
     .finally(renderTakes);
 }
 
-// Finger tracking from the HQ worker: per hand, 21 wrist-relative keypoints per frame (GVHMR world axes).
 const _kp = Array.from({ length: 21 }, () => new THREE.Vector3());
 function applyHandsFrame(hands, f, yawFix) {
-  // WiLoR's MANO hands are anatomically valid already; joint limits only help MediaPipe's noisy depth.
   HAND_LIMITS.enabled = hands?.method !== 'wilor';
   for (const [src, side] of [['R', 'Right'], ['L', 'Left']]) {
     const h = hands?.[src];
-    if (settings.hands !== false && h?.valid[f]) {
+    if (settings.hands !== false && h?.valid?.[f]) {
       const o = f * 63;
       for (let j = 0; j < 21; j++) _kp[j].set(h.kp[o + j * 3], h.kp[o + j * 3 + 1], h.kp[o + j * 3 + 2]).applyQuaternion(yawFix);
       rig.applyHand(side, _kp);
@@ -365,23 +499,21 @@ function applyHandsFrame(hands, f, yawFix) {
   }
 }
 
-/** GVHMR SMPL params → Track of Mixamo local rotations + grounded hips path. */
 function bakeSmpl(r) {
   const { n, fps, global_orient: GO, body_pose: BP, transl: T, leg_length } = r;
-  // Heading: turn GVHMR's world so the character faces the viewer the way the person faces the
-  // camera (from the in-camera orientation). Chained clips share the camera, so headings line up.
   const fWorld = new THREE.Vector3(0, 0, 1).applyQuaternion(aaToQuat(GO[0], GO[1], GO[2]));
   let targetYaw = 0;
   if (r.incam_global_orient0) {
     const [a, b, c] = r.incam_global_orient0;
-    const fc = new THREE.Vector3(0, 0, 1).applyQuaternion(aaToQuat(a, b, c)); // OpenCV camera axes
-    targetYaw = Math.atan2(fc.x, -fc.z);                                        // → three.js (x, -y, -z)
+    const fc = new THREE.Vector3(0, 0, 1).applyQuaternion(aaToQuat(a, b, c));
+    targetYaw = Math.atan2(fc.x, -fc.z);
   }
   const yawFix = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), targetYaw - Math.atan2(fWorld.x, fWorld.z));
-  const scale = rig.legLength / (leg_length || 0.85);
+  const scale = rig ? rig.legLength / (leg_length || 0.85) : 1.0;
   const track = new Track(rig.order.length);
   const lows = [];
   const d = new THREE.Vector3();
+
   for (let f = 0; f < n; f++) {
     rig.reset();
     rig.applySmplGlobal(smplGlobals(GO.subarray ? GO.subarray(f * 3, f * 3 + 3) : GO.slice(f * 3, f * 3 + 3), BP.slice(f * 63, f * 63 + 63), yawFix));
@@ -392,7 +524,7 @@ function bakeSmpl(r) {
     lows.push(rig.lowestFoot());
     track.push(f / fps, rig.snapshot());
   }
-  // Ground: the typical lowest foot sits on the floor; never sink below it.
+
   const sorted = [...lows].sort((a, b) => a - b);
   const offset = rig.floorY - sorted[Math.floor(sorted.length * 0.08)];
   track.p.forEach((p, f) => { p[1] += offset + Math.max(0, rig.floorY - (lows[f] + offset)); });
@@ -400,7 +532,7 @@ function bakeSmpl(r) {
   return track;
 }
 
-// ---- playback -----------------------------------------------------------------------------
+// ---- Playback & Sequencing -----------------------------------------------------
 const video = $('#video');
 const overlay = $('#overlay');
 const octx = overlay.getContext('2d');
@@ -414,40 +546,34 @@ let lastRenderedHips = new THREE.Vector3();
 let switchFrom = null, switchAt = 0;
 
 function setSmoothing(s) {
-  // s=0 → raw, s=1 → very smooth
   worldFilter.minCutoff = hipFilter.minCutoff = THREE.MathUtils.lerp(6, 0.4, s);
   worldFilter.beta = hipFilter.beta = THREE.MathUtils.lerp(1.2, 0.15, s);
+  const badge = $('#smoothing-v');
+  if (badge) badge.textContent = Math.round(s * 100) + '%';
 }
 
-let held = false; // stream mode: clip ended, nothing ready yet → hold the last pose
+let held = false;
+
 function enqueue(take) {
   queue.push(take);
-  if (capturing) return; // the capture script decides what's on screen
-  // Switch right away unless the current clip is still on its first (live) pass,
-  // or we're chaining (then the next clip continues from this one's last frame).
+  if (capturing) return;
   if (!current || held || (current.liveDone && !chainOn())) playNext();
 }
 
-/** Out of HQ-ready clips: start the next generated one now on the live pass instead of freezing. */
-function startStarved() {
-  const next = takes.find((t) => t.awaitingHq && t.status === 'ready' && !t.started);
-  if (!next) return false;
-  next.awaitingHq = false;
-  log(`#${next.id} starting on live preview (hq still running)`);
-  enqueue(next);
-  return true;
+function playNext() {
+  const t = queue.shift();
+  if (t) playTake(t);
 }
-
-function playNext() { const t = queue.shift(); if (t) playTake(t); }
 
 function playTake(take) {
   if (!take.videoUrl) return;
   if (current && rig) { switchFrom = rig.snapshot(); switchAt = performance.now(); }
   held = false; take.started = true;
-  if (take.hq) take.hqAt = -1e9; // already HQ: no live→HQ cross-fade
+  if (take.hq) take.hqAt = -1e9;
   const prev = current;
   current = take;
   const qi = queue.indexOf(take); if (qi >= 0) queue.splice(qi, 1);
+
   if (!take.rootOffset) {
     take.rootOffset = new THREE.Vector3();
     if (chainOn() && prev && rig) {
@@ -455,11 +581,13 @@ function playTake(take) {
       take.rootOffset.clampLength(0, 2.5);
     }
   }
+
   if (!take.liveDone) {
     take.live = new Track(rig.order.length);
     liveState = { hip0: null, baseY: null, mpp: null, scale: null };
     worldFilter.reset(); hipFilter.reset(); liveSnap = null;
   }
+
   $('#vid-empty').style.display = 'none';
   video.style.display = 'block';
   video.src = take.videoUrl;
@@ -467,69 +595,65 @@ function playTake(take) {
   lastDetectT = -1;
   video.play().catch(() => {});
   renderTakes();
-  maybeIdle();
 }
 
 video.addEventListener('ended', () => {
   if (settings.swap && rig) swapCharacter().catch((e) => log('swap failed: ' + e.message, 'err'));
   if (current && !current.liveDone) {
     current.liveDone = current.live.length > 3;
-    log(`#${current.id} live pass: ${current.live.length} frames`);
+    log(`#${current.id} live pass complete (${current.live.length} frames)`);
     renderTakes();
   }
   if (queue.length) playNext();
-  else if (settings.stream) { held = true; if (!startStarved()) maybeIdle(); } // freeze on the last frame
+  else if (settings.stream) { held = true; }
   else { video.currentTime = 0; video.play().catch(() => {}); }
 });
 
-// Per decoded video frame: run pose, draw overlay, record the live track.
-const stats = { frames: 0, detections: 0, world: 0, recorded: 0 };
+// Per decoded frame: MediaPipe pose detection + overlay
 let lastDetectT = -1;
-// Called from the render loop: run pose once per new video frame (requestVideoFrameCallback
-// stops firing after the source changes in Chromium, so we poll currentTime instead).
+let lastPose2d = null;
+
 function detectIfNewFrame() {
   if (!landmarker || !rig || !current || video.readyState < 2 || video.seeking) return;
   const mediaTime = video.currentTime;
   if (mediaTime === lastDetectT) return;
-  if (mediaTime < lastDetectT) liveLoopReset();
+  if (mediaTime < lastDetectT) { worldFilter.reset(); hipFilter.reset(); }
   lastDetectT = mediaTime;
+
   try {
-    stats.frames++;
-    const ts = Math.max(mpTs + 1, performance.now()); mpTs = ts;
+    const ts = Math.max(mpTs + 1, performance.now());
+    mpTs = ts;
     const res = landmarker.detectForVideo(video, ts);
-    stats.detections += res.landmarks?.length ? 1 : 0;
-    stats.world += res.worldLandmarks?.length ? 1 : 0;
     drawOverlay(res);
     if (!current.liveDone && res.worldLandmarks?.[0]) {
       liveSnap = solveLive(res, mediaTime);
-      current.live.push(mediaTime, liveSnap); stats.recorded++;
+      current.live.push(mediaTime, liveSnap);
     }
-  } catch (e) { console.error(e); }
+  } catch (e) {
+    console.error(e);
+  }
 }
-function liveLoopReset() { /* video looped or switched: keep filters from smearing across the jump */ worldFilter.reset(); hipFilter.reset(); }
 
-let lastPose2d = null; // latest MediaPipe pose landmarks (normalized video coords) — used by the capture zoom
 function drawOverlay(res) {
   if (res.landmarks?.[0]) lastPose2d = res.landmarks[0];
-  overlay.width = video.videoWidth; overlay.height = video.videoHeight;
+  overlay.width = video.videoWidth || 320;
+  overlay.height = video.videoHeight || 240;
   octx.clearRect(0, 0, overlay.width, overlay.height);
   if (!settings.showSkel || !res.landmarks?.[0]) return;
   const du = new DrawingUtils(octx);
-  du.drawConnectors(res.landmarks[0], PoseLandmarker.POSE_CONNECTIONS, { color: '#7cf29a', lineWidth: 3 });
-  du.drawLandmarks(res.landmarks[0], { color: '#5ab8ff', fillColor: '#0e0f11', lineWidth: 2, radius: 3 });
+  du.drawConnectors(res.landmarks[0], PoseLandmarker.POSE_CONNECTIONS, { color: '#06b6d4', lineWidth: 3 });
+  du.drawLandmarks(res.landmarks[0], { color: '#ec4899', fillColor: '#090710', lineWidth: 2, radius: 3 });
 }
 
 const _lm = Array.from({ length: 33 }, () => new THREE.Vector3());
 function solveLive(res, t) {
   const w = res.worldLandmarks[0], n2 = res.landmarks[0];
   const raw = new Float32Array(99);
-  // MediaPipe world: x = image right (subject's left when facing camera), y down, z away from camera.
   w.forEach((p, i) => { raw[i * 3] = p.x; raw[i * 3 + 1] = -p.y; raw[i * 3 + 2] = -p.z; });
   const f = worldFilter.filter(raw, t);
   for (let i = 0; i < 33; i++) _lm[i].set(f[i * 3], f[i * 3 + 1], f[i * 3 + 2]);
   const vis = w.map((p) => p.visibility ?? 1);
 
-  // Root motion from the 2D hip track, converted to meters via torso length.
   const W = video.videoWidth, H = video.videoHeight;
   const px = (i) => new THREE.Vector2(n2[i].x * W, n2[i].y * H);
   const hipPx = px(23).add(px(24)).multiplyScalar(0.5);
@@ -539,6 +663,7 @@ function solveLive(res, t) {
   const midSh = _lm[11].clone().add(_lm[12]).multiplyScalar(0.5);
   const mpp = midSh.distanceTo(midHip) / Math.max(1, shPx.distanceTo(hipPx));
   const leg = (_lm[23].distanceTo(_lm[25]) + _lm[25].distanceTo(_lm[27]) + _lm[24].distanceTo(_lm[26]) + _lm[26].distanceTo(_lm[28])) / 2;
+
   const S = liveState;
   S.mpp = S.mpp == null ? mpp : S.mpp + 0.05 * (mpp - S.mpp);
   S.scale = S.scale == null ? rig.legLength / leg : S.scale + 0.05 * (rig.legLength / leg - S.scale);
@@ -558,18 +683,31 @@ function solveLive(res, t) {
   return rig.snapshot();
 }
 
-// ---- render loop ----------------------------------------------------------------------------
-const bufA = { q: null, p: new Float32Array(3) }, bufB = { q: null, p: new Float32Array(3) }, bufC = { q: null, p: new Float32Array(3) };
+// ---- Render Loop & HUD Telemetry -----------------------------------------------
+const bufA = { q: null, p: new Float32Array(3) };
+const bufB = { q: null, p: new Float32Array(3) };
+const bufC = { q: null, p: new Float32Array(3) };
 
 let lastRaf = 0;
-let capturing = false; // frame-exact capture (tools/capture.mjs) drives tick() itself
+let capturing = false;
+
 function frame() {
   requestAnimationFrame(frame);
   lastRaf = performance.now();
   if (!capturing) tick();
 }
-// Browsers pause rAF in hidden/occluded views; keep pose + playback running from a timer then.
-setInterval(() => { if (!capturing && performance.now() - lastRaf > 100) tick(); }, 33);
+
+setInterval(() => {
+  if (!capturing && performance.now() - lastRaf > 100) tick();
+}, 33);
+
+function formatTime(s) {
+  if (isNaN(s) || !isFinite(s)) return '00:00';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  const ms = Math.floor((s % 1) * 100);
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}.${String(ms).padStart(2, '0')}`;
+}
 
 function tick() {
   detectIfNewFrame();
@@ -579,200 +717,400 @@ function tick() {
     const t = video.currentTime;
     const live = current.liveDone ? current.live.sample(t, bufA) : liveSnap;
     const hq = current.hq ? current.hq.sample(t, bufB) : null;
-    let snap = hq || live, src = hq ? 'hq · gvhmr' : live ? 'live · mediapipe' : '—';
+    let snap = hq || live;
+    let src = hq ? 'HQ · GVHMR (GPU)' : live ? 'LIVE · MediaPipe' : '—';
+
     if (hq && live) {
       const w = Math.min(1, (performance.now() - current.hqAt) / 600);
-      if (w < 1) { snap = blendSnapshots(live.q, live.p, hq.q, hq.p, w, bufC); src = 'live → hq'; }
+      if (w < 1) {
+        snap = blendSnapshots(live.q, live.p, hq.q, hq.p, w, bufC);
+        src = 'LIVE → HQ BLEND';
+      }
     }
+
     if (snap && switchFrom) {
       const w = Math.min(1, (performance.now() - switchAt) / 250);
       if (w < 1) snap = blendSnapshots(switchFrom.q, switchFrom.p, snap.q, snap.p, w, snap === bufC ? bufA : bufC);
       else switchFrom = null;
     }
+
     if (snap) {
       rig.applySnapshot(snap);
-      if (current.rootOffset?.lengthSq()) { const h = rig.hipsWorld().add(current.rootOffset); rig.setHipsWorld(h); }
+      if (current.rootOffset?.lengthSq()) {
+        const h = rig.hipsWorld().add(current.rootOffset);
+        rig.setHipsWorld(h);
+      }
       rig.hipsWorld(lastRenderedHips);
     }
-    const hud = $('#hud-src'); hud.textContent = src; hud.className = 'tag ' + (hq ? 'src-hq' : 'src-live');
-    const buf = settings.stream ? `  ·  ready ${queue.length}  gen ${genBusy}  hq ${takes.filter((x) => x.hqStatus === 'running').length}${held ? '  ·  HOLD' : ''}` : '';
-    $('#hud-time').textContent = `#${current.id}  ${t.toFixed(2)}s${buf}`;
+
+    // Update Floating HUD Playback Dock
+    const hudSrc = $('#hud-src');
+    if (hudSrc) {
+      hudSrc.textContent = src;
+      hudSrc.className = 'dock-motion-badge ' + (hq ? 'hq' : 'live');
+    }
+
+    const scrubber = $('#scrubber');
+    if (scrubber && !scrubberDragging && video.duration) {
+      scrubber.value = ((video.currentTime / video.duration) * 100).toFixed(1);
+    }
+
+    const dockTime = $('#dock-time');
+    if (dockTime) {
+      dockTime.textContent = `${formatTime(video.currentTime)} / ${formatTime(video.duration)}`;
+    }
   }
-  if (rig) {
-    const shown = onStage ? cast[onStage].rig : rig;
-    if (shown !== rig) shown.copyPoseFrom(rig);
-    stage.placeContactShadow(shown.model, shown.hipsWorld(), shown.floorY, shown.height);
-  }
-  stage.update(rig ? lastRenderedHips : null);
+
+  // Update Three.js rendering
+  const activeRig = onStage ? cast[onStage].rig : rig;
+  if (activeRig) stage.update(activeRig.hipsWorld());
+  else stage.update(null);
 }
 
-// ---- export --------------------------------------------------------------------------------
-async function exportTake(take) {
-  const track = take.best;
-  if (!track) return;
-  const name = `take${take.id}_${take.prompt.replace(/[^a-z0-9]+/gi, '_').slice(0, 40)}${take.hq ? '_hq' : '_live'}`;
-  const clip = trackToClip(rig, track, name);
-  const glb = await new GLTFExporter().parseAsync(model, { binary: true, animations: [clip] });
+// ---- GLB Export ----------------------------------------------------------------
+async function exportTakeGlb(take) {
+  if (!rig) return;
+  banner(`Exporting #${take.id} to GLB animation...`);
+  log(`Exporting #${take.id} to GLB animation...`);
+  const track = take.hq || take.live;
+  if (!track || !track.length) {
+    banner('');
+    log(`Cannot export #${take.id}: no recorded motion track`, 'err');
+    return;
+  }
+
+  const clip = trackToClip(track, rig, take.prompt);
+  const root = onStage ? cast[onStage].root : model;
+  const prevPose = rig.snapshot();
+  rig.reset();
+
+  const exporter = new GLTFExporter();
+  const glb = await new Promise((res, rej) => {
+    exporter.parse(root, res, rej, { binary: true, animations: [clip] });
+  });
+
+  rig.applySnapshot(prevPose);
+  banner('');
+
+  const blob = new Blob([glb], { type: 'model/gltf-binary' });
   const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([glb], { type: 'model/gltf-binary' }));
-  a.download = name + '.glb'; a.click();
-  // Also keep a copy in ./takes (with the source clip URL) for tools/render_blender.py.
+  a.href = URL.createObjectURL(blob);
+  const safePrompt = take.prompt.replace(/[^a-z0-9_-]+/gi, '_').slice(0, 32);
+  const name = `take_${take.id}_${safePrompt}`;
+  a.download = `${name}.glb`;
+  a.click();
+
+  // Save copy to ./takes
   const q = new URLSearchParams({ name, prompt: take.prompt, ...(take.videoUrl?.startsWith('http') ? { source: take.videoUrl } : {}) });
-  fetch('/api/takes?' + q, { method: 'POST', body: glb }).then((r) => r.ok && log(`saved takes/${name}.glb`, 'ok')).catch(() => {});
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-  log(`exported ${name}.glb`, 'ok');
+  fetch('/api/takes?' + q, { method: 'POST', body: glb }).catch(() => {});
+  log(`Exported ${name}.glb`, 'ok');
 }
 
-// ---- UI wiring --------------------------------------------------------------------------------
-bindSetting('stream', 'checked', (on) => {
-  for (const id of ['chain', 'waitHq']) { const el = $('#' + id); el.disabled = on; el.closest('label').style.opacity = on ? 0.5 : 1; }
+// ---- UI Event Wiring & Interactions --------------------------------------------
+let scrubberDragging = false;
+
+// Play / Pause Dock Button
+const dockPlayBtn = $('#dock-play');
+if (dockPlayBtn) {
+  dockPlayBtn.onclick = () => {
+    if (video.paused) video.play(); else video.pause();
+  };
+  video.addEventListener('play', () => {
+    dockPlayBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>`;
+  });
+  video.addEventListener('pause', () => {
+    dockPlayBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
+  });
+}
+
+// Timeline Scrubber
+const scrubberEl = $('#scrubber');
+if (scrubberEl) {
+  scrubberEl.addEventListener('mousedown', () => { scrubberDragging = true; });
+  scrubberEl.addEventListener('touchstart', () => { scrubberDragging = true; });
+  scrubberEl.addEventListener('input', () => {
+    if (video.duration) {
+      video.currentTime = (Number(scrubberEl.value) / 100) * video.duration;
+    }
+  });
+  const stopDrag = () => { scrubberDragging = false; };
+  window.addEventListener('mouseup', stopDrag);
+  window.addEventListener('touchend', stopDrag);
+}
+
+// Speed Chips
+$$('.dock-chip[data-speed]').forEach((chip) => {
+  chip.onclick = () => {
+    $$('.dock-chip[data-speed]').forEach((c) => c.classList.remove('active'));
+    chip.classList.add('active');
+    video.playbackRate = Number(chip.dataset.speed);
+  };
 });
-bindSetting('source'); bindSetting('chain', 'checked'); bindSetting('resolution');
+
+// Camera Presets
+$$('.cam-btn[data-cam]').forEach((btn) => {
+  btn.onclick = () => stage.setCameraPreset(btn.dataset.cam);
+});
+
+// Lighting Themes
+$$('#lighting-themes .preset-chip[data-theme]').forEach((chip) => {
+  chip.onclick = () => {
+    $$('#lighting-themes .preset-chip').forEach((c) => c.style.borderColor = '');
+    chip.style.borderColor = 'var(--neon-pink)';
+    settings.lightingTheme = chip.dataset.theme;
+    save();
+    stage.setLightingTheme(chip.dataset.theme);
+  };
+});
+
+// Character Selector Cards
+$$('.char-card[data-char]').forEach((card) => {
+  card.onclick = () => {
+    $$('.char-card').forEach((c) => c.classList.remove('active'));
+    card.classList.add('active');
+    const charKey = card.dataset.char;
+    settings.character = charKey;
+    save();
+    if (CHARACTERS[charKey]) {
+      loadCharacter(CHARACTERS[charKey].url, CHARACTERS[charKey].name).catch((e) => log('character error: ' + e.message, 'err'));
+    }
+  };
+});
+
+// Tab Bar Navigation
+$$('.tab-btn').forEach((btn) => {
+  btn.onclick = () => {
+    $$('.tab-btn').forEach((b) => b.classList.remove('active'));
+    $$('.tab-pane').forEach((p) => p.classList.remove('active'));
+    btn.classList.add('active');
+    const targetPane = $('#' + btn.dataset.tab);
+    if (targetPane) targetPane.classList.add('active');
+  };
+});
+
+// Surprise Me Prompt Generator
+$('#btn-surprise')?.addEventListener('click', () => {
+  const allPrompts = [...PRESETS, ...DYNAMIC_PROMPTS];
+  const rand = allPrompts[Math.floor(Math.random() * allPrompts.length)];
+  $('#prompt').value = rand;
+  $('#prompt').focus();
+});
+
+$('#btn-clear-prompt')?.addEventListener('click', () => {
+  $('#prompt').value = '';
+  $('#prompt').focus();
+});
+
+$('#btn-clear-log')?.addEventListener('click', () => {
+  const el = $('#log');
+  if (el) el.innerHTML = '';
+});
+
+// Populate Preset Chips
+const chipsContainer = $('#chips');
+if (chipsContainer) {
+  PRESETS.forEach((p) => {
+    const chip = document.createElement('div');
+    chip.className = 'preset-chip';
+    chip.textContent = p;
+    chip.onclick = () => {
+      $('#prompt').value = p;
+      submitPrompt(p);
+    };
+    chipsContainer.appendChild(chip);
+  });
+}
+
+// Generate Button & Keyboard Shortcuts
+$('#go')?.addEventListener('click', () => submitPrompt($('#prompt').value));
+$('#prompt')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    submitPrompt($('#prompt').value);
+  }
+});
+window.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' && e.target.tagName !== 'TEXTAREA' && e.target.tagName !== 'INPUT') {
+    e.preventDefault();
+    if (video.paused) video.play(); else video.pause();
+  }
+});
+
+// Drag & Drop Video Upload
+const dropZone = $('#drop-zone');
+if (dropZone) {
+  dropZone.onclick = () => $('#file-vid').click();
+  dropZone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropZone.classList.add('dragover');
+  });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+  dropZone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropZone.classList.remove('dragover');
+    if (e.dataTransfer.files?.[0]) uploadLocalVideo(e.dataTransfer.files[0]);
+  });
+}
+$('#file-vid')?.addEventListener('change', (e) => {
+  if (e.target.files?.[0]) uploadLocalVideo(e.target.files[0]);
+});
+
+// Custom Character Mixamo File Upload
+$('#btn-char')?.addEventListener('click', () => $('#file-char').click());
+$('#file-char')?.addEventListener('change', (e) => {
+  const f = e.target.files?.[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  loadCharacter(url, f.name).catch((err) => {
+    log('Character load failed: ' + err.message, 'err');
+    $('#pill-rig-text').textContent = 'Rig: Failed';
+  });
+});
+
+// Performer Generation
+$('#performer-new')?.addEventListener('click', () => {
+  ensurePerformer(true).catch((e) => {
+    banner('');
+    log('Performer generation failed: ' + e.message, 'err');
+  });
+});
+
+// Settings & Cloudflare Modal
+const settingsModal = $('#modal-settings');
+$('#btn-settings')?.addEventListener('click', () => {
+  $('#cfg-fal-key').value = settings.falKey || '';
+  settingsModal.classList.add('open');
+  fetchSystemTelemetry();
+});
+
+const closeModal = () => settingsModal.classList.remove('open');
+$('#modal-close')?.addEventListener('click', closeModal);
+$('#btn-close-modal')?.addEventListener('click', closeModal);
+settingsModal?.addEventListener('click', (e) => {
+  if (e.target === settingsModal) closeModal();
+});
+
+$('#btn-save-key')?.addEventListener('click', () => {
+  settings.falKey = $('#cfg-fal-key').value.trim();
+  save();
+  log('FAL API Key updated', 'ok');
+  banner('FAL API Key saved successfully');
+  setTimeout(() => banner(''), 3000);
+});
+
+$('#btn-copy-cf')?.addEventListener('click', () => {
+  const url = $('#cfg-cf-url').value;
+  if (url && url !== 'Detecting...') {
+    navigator.clipboard.writeText(url);
+    banner('Cloudflare Tunnel URL copied to clipboard!');
+    setTimeout(() => banner(''), 3000);
+  }
+});
+
+// Video PIP Minimizing & Skeleton Toggle
+let pipMinimized = false;
+$('#pip-min')?.addEventListener('click', () => {
+  pipMinimized = !pipMinimized;
+  const body = $('.pip-body');
+  if (body) body.style.display = pipMinimized ? 'none' : 'grid';
+  $('#pip-min').textContent = pipMinimized ? '□' : '—';
+});
+
+$('#pip-toggle-skel')?.addEventListener('click', () => {
+  settings.showSkel = !settings.showSkel;
+  $('#showSkel').checked = settings.showSkel;
+  save();
+  $('#pip-toggle-skel').style.opacity = settings.showSkel ? '1' : '0.4';
+});
+
+// Fullscreen Toggle
+$('#btn-fullscreen')?.addEventListener('click', () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen();
+  else document.exitFullscreen();
+});
+
+// Form Bindings
+bindSetting('stream', 'checked', (on) => {
+  for (const id of ['chain', 'waitHq']) {
+    const el = $('#' + id);
+    if (el) { el.disabled = on; el.closest('.switch-control').style.opacity = on ? '0.5' : '1'; }
+  }
+});
+bindSetting('source');
+bindSetting('chain', 'checked');
+bindSetting('resolution');
 bindSetting('videoModel', 'value', (m) => {
-  const d = $('#duration'); d.min = m === 'flux3' ? 5 : 2;  // FLUX 3 Max: 5–20s
-  if (settings.duration < d.min) { settings.duration = Number(d.min); d.value = d.min; $('#duration-v').textContent = d.min + 's'; save(); }
+  const d = $('#duration');
+  if (d) {
+    d.min = m === 'flux3' ? 5 : 2;
+    if (settings.duration < d.min) {
+      settings.duration = Number(d.min);
+      d.value = d.min;
+      $('#duration-v').textContent = d.min + 's';
+      save();
+    }
+  }
 });
 bindSetting('swap', 'checked', (on) => { if (!on && model) showOnStage(null); });
 bindSetting('cinematic', 'checked', (on) => stage.setCinematic(on));
-bindSetting('character', 'value', (c) => { if (rig && CHARACTERS[c]) loadCharacter(CHARACTERS[c].url, CHARACTERS[c].name).catch((e) => log('character failed: ' + e.message, 'err')); });
-bindSetting('duration', 'value', (v) => ($('#duration-v').textContent = v + 's'));
+bindSetting('duration', 'value', (v) => { $('#duration-v').textContent = v + 's'; });
 bindSetting('hq', 'checked');
-bindSetting('hands', 'checked', () => { if (rig) for (const t of takes) if (t.hqRaw) t.hq = bakeSmpl(t.hqRaw); }); bindSetting('waitHq', 'checked'); bindSetting('rootMotion', 'checked');
+bindSetting('hands', 'checked', () => { if (rig) for (const t of takes) if (t.hqRaw) t.hq = bakeSmpl(t.hqRaw); });
+bindSetting('waitHq', 'checked');
+bindSetting('rootMotion', 'checked');
 bindSetting('showSkel', 'checked');
 bindSetting('smoothing', 'value', setSmoothing);
 bindSetting('poseModel', 'value', (v) => { if (vision) initPose(v); });
-
-const chips = $('#chips');
-for (const p of PRESETS) {
-  const c = document.createElement('span'); c.className = 'chip'; c.textContent = p;
-  c.onclick = () => submitPrompt(p);
-  chips.appendChild(c);
-}
-$('#go').onclick = () => submitPrompt($('#prompt').value);
-$('#prompt').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submitPrompt($('#prompt').value); } });
-$('#performer-new').onclick = () => ensurePerformer(true).catch((e) => { banner(''); log('performer failed: ' + e.message, 'err'); });
-function showPerformer() {
-  const img = $('#performer-img'), url = settings.performerUrls[settings.orientation];
-  img.classList.toggle('portrait', settings.orientation === 'portrait');
-  if (url) img.src = url; else img.removeAttribute('src');
-  // Before any clip has loaded, shape the empty video panel like the clips that will come.
-  if (!video.videoWidth) $('#vidwrap').classList.toggle('portrait', settings.orientation === 'portrait');
-}
-if (settings.performerUrl) { settings.performerUrls.landscape ||= settings.performerUrl; delete settings.performerUrl; save(); }
 bindSetting('orientation', 'value', showPerformer);
 
-$('#btn-char').onclick = () => $('#file-char').click();
-$('#file-char').onchange = (e) => {
-  const f = e.target.files[0]; if (!f) return;
-  const url = URL.createObjectURL(f);
-  loadCharacter(url, f.name).catch((err) => { log('character failed: ' + err.message, 'err'); pill('rig', 'character failed', 'bad'); });
-};
-$('#btn-vid').onclick = () => $('#file-vid').click();
-$('#file-vid').onchange = (e) => {
-  const f = e.target.files[0]; if (!f) return;
-  const take = new Take(`(file) ${f.name}`);
-  take.videoUrl = URL.createObjectURL(f); take.status = 'ready'; take.timings.gen = 0;
-  takes.push(take); renderTakes(); enqueue(take);
-};
-
-// ---- capture zoom: glide the 3D camera onto a hand and zoom the video panel onto the same hand ----
-// k ∈ [0,1] is the zoom amount (the capture script ramps it linearly in time); t is the output time.
-// Eased with smootherstep, distance/scale interpolated in log space (constant perceived speed), the
-// camera arcs around the hand on the way in and drifts slowly while holding.
-let zoomBase = null, zoomTgt = null, zoomOrigin = null;
-const smootherstep = (x) => x * x * x * (x * (x * 6 - 15) + 10);
-function applyCaptureZoom(k, bone, t = 0) {
-  const r = onStage ? cast[onStage].rig : rig;
-  if (k <= 0.0005) {
-    if (zoomBase) { stage.setFocusLock(null); stage.camera.position.copy(zoomBase.pos); stage.controls.target.copy(zoomBase.tgt); zoomBase = null; }
-    for (const el of [video, overlay]) el.style.transform = '';
-    overlay.style.opacity = ''; zoomTgt = zoomOrigin = null;
-    return;
-  }
-  if (!zoomBase) {
-    const off = stage.camera.position.clone().sub(stage.controls.target);
-    zoomBase = { pos: stage.camera.position.clone(), tgt: stage.controls.target.clone(), dir: off.clone().normalize(), dist: off.length() };
-  }
-  const e = smootherstep(Math.min(1, Math.max(0, k)));
-  // Target: palm centre, followed smoothly so the hand stays framed while it moves.
-  const hand = r.bones[bone].getWorldPosition(new THREE.Vector3());
-  const mid = r.bones[bone.replace('Hand', 'HandMiddle2')];
-  const want = mid ? hand.lerp(mid.getWorldPosition(new THREE.Vector3()), 0.6) : hand;
-  zoomTgt = zoomTgt ? zoomTgt.lerp(want, 0.3) : want.clone();
-  const tgt = zoomBase.tgt.clone().lerp(zoomTgt, e);
-  // Direction arcs from the wide shot's to a 3/4 close-up angle, plus a slow drift while held.
-  // Nearly straight-on, like the performer's camera, so the close-up reads like the video panel.
-  const closeDir = new THREE.Vector3(bone.startsWith('Right') ? 0.06 : -0.06, 0.04, 1).normalize();
-  const qArc = new THREE.Quaternion().setFromUnitVectors(zoomBase.dir, closeDir);
-  const dir = zoomBase.dir.clone().applyQuaternion(new THREE.Quaternion().slerp(qArc, e));
-  dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), 0.09 * Math.sin(t * 0.7) * e);
-  const dist = Math.exp(Math.log(zoomBase.dist) + (Math.log(0.52) - Math.log(zoomBase.dist)) * e);
-  stage.setFocusLock(tgt);
-  stage.camera.position.copy(tgt).addScaledVector(dir, dist);
-  stage.update(null);
-  // Video panel: same easing, zooming on the performer's matching hand (pose landmarks right 16/18/20, left 15/17/19).
-  const ids = bone.startsWith('Right') ? [16, 18, 20] : [15, 17, 19];
-  if (lastPose2d) {
-    // Wrist + knuckle landmarks, nudged past the knuckles toward the fingertips.
-    const w = lastPose2d[ids[0]], k1 = lastPose2d[ids[1]], k2 = lastPose2d[ids[2]];
-    const kx = (k1.x + k2.x) / 2, ky = (k1.y + k2.y) / 2;
-    const c = [kx + 0.6 * (kx - w.x), ky + 0.6 * (ky - w.y)];
-    zoomOrigin = zoomOrigin ? [zoomOrigin[0] + 0.3 * (c[0] - zoomOrigin[0]), zoomOrigin[1] + 0.3 * (c[1] - zoomOrigin[1])] : c;
-  }
-  const o = zoomOrigin || [0.5, 0.35];
-  const scale = Math.exp(Math.log(3.2) * e);
-  for (const el of [video, overlay]) { el.style.transformOrigin = `${o[0] * 100}% ${o[1] * 100}%`; el.style.transform = `scale(${scale})`; }
-  overlay.style.opacity = String(1 - e); // the stick figure would only clutter the close-up
+// System Telemetry Polling (GPU & Cloudflare Tunnel)
+async function fetchSystemTelemetry() {
+  try {
+    const info = await api('/api/system');
+    if (info.gpu) {
+      $('#pill-gpu-text').textContent = info.cuda ? `GPU: ${info.gpu}` : 'CPU Mode';
+    }
+    if (info.tunnel_url) {
+      $('#pill-cf-text').textContent = 'Cloudflare: Live';
+      $('#pill-cf').className = 'status-pill tunnel active';
+      $('#cfg-cf-url').value = info.tunnel_url;
+    } else {
+      $('#pill-cf-text').textContent = 'Localhost';
+      $('#pill-cf').className = 'status-pill tunnel';
+      $('#cfg-cf-url').value = window.location.origin;
+    }
+    const sysEl = $('#cfg-sys-info');
+    if (sysEl) {
+      sysEl.innerHTML = `
+        <strong>GPU:</strong> ${info.gpu} (${info.vram_used_gb || 0} / ${info.vram_total_gb || 0} GB VRAM)<br>
+        <strong>GVHMR Engine:</strong> ${info.worker_ready ? '<span style="color:#10b981;">Ready on GPU</span>' : `<span style="color:#f59e0b;">${info.worker_error || 'Loading...'}</span>`}<br>
+        <strong>Platform:</strong> ${info.platform} · Python ${info.python_version || '3.x'}<br>
+        <strong>FAL API Key:</strong> ${info.has_fal_key || settings.falKey ? '<span style="color:#10b981;">Configured</span>' : '<span style="color:#f43f5e;">Missing (add above)</span>'}
+      `;
+    }
+  } catch {}
 }
 
-// Debug handle for the console.
+// Debug API handle for console & tests
 window.p2r = {
-  get current() { return current; }, get rig() { return rig; }, takes, video, stats,
-  stage, HAND_LIMITS, rebake() { for (const t of takes) if (t.hqRaw) t.hq = bakeSmpl(t.hqRaw); },
-  /** Debug: frame the camera on a bone (e.g. 'RightHand') at distance d. */
-  focusBone(name, d = 0.6, dir = [0.15, 0.1, 1]) {
-    const r = onStage ? cast[onStage].rig : rig;
-    const p = r.bones[name].getWorldPosition(new THREE.Vector3());
-    stage.setCinematic(false); stage.controls.target.copy(p);
-    stage.camera.position.copy(p).add(new THREE.Vector3(...dir).normalize().multiplyScalar(d));
-    stage.setFocusLock?.(p);
-  },
-  // ---- frame-exact capture: used by tools/capture.mjs ----
-  submit(prompt, { duration } = {}) {
-    if (duration) { settings.duration = duration; $('#duration').value = duration; $('#duration-v').textContent = duration + 's'; }
-    submitPrompt(prompt); return takes[takes.length - 1].id;
-  },
-  take(id) { const t = takes.find((x) => x.id === id); return t && { id: t.id, status: t.status, hq: t.hqStatus, url: t.videoUrl, duration: t.hq?.duration ?? null }; },
-  async beginCapture(id) {
-    const t = takes.find((x) => x.id === id);
-    if (!t?.hq) throw new Error('take has no HQ motion');
-    capturing = true; video.loop = false;
-    if (current !== t) playTake(t);
-    video.pause();
-    await new Promise((r) => (video.readyState >= 2 ? r() : video.addEventListener('loadeddata', r, { once: true })));
-    renderTakes();
-    return { duration: video.duration, frames: Math.floor(video.duration * 30) };
-  },
-  /** Show exactly media time t: seek, pose (GVHMR), overlay, camera, render. */
-  async renderAt(t, zoom = null) {
-    video.pause();
-    if (Math.abs(video.currentTime - t) > 1e-4) {
-      const seeked = new Promise((r) => video.addEventListener('seeked', r, { once: true }));
-      video.currentTime = t; await seeked;
-    }
-    lastDetectT = -1; tick();
-    if (zoom) applyCaptureZoom(zoom.k, zoom.bone || 'RightHand', zoom.t || 0);
-    // Two frames so the compositor has painted (with a timeout: hidden tabs don't run rAF).
-    await Promise.race([new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))), new Promise((r) => setTimeout(r, 80))]);
-  },
-  endCapture() { capturing = false; video.play().catch(() => {}); },
-  playUrl(u, hq = true, hands, prompt) { const t = new Take(prompt || 'debug: ' + u.slice(-24)); t.videoUrl = u; t.status = 'ready'; t.handsMethod = hands; takes.push(t); if (hq && hqOnline) runHQ(t); enqueue(t); return { id: t.id }; },
+  get current() { return current; },
+  get rig() { return rig; },
+  takes, video, stage, HAND_LIMITS,
+  submit: submitPrompt,
+  upload: uploadLocalVideo,
 };
 
-// ---- boot --------------------------------------------------------------------------------------
+// ---- Boot Application ----------------------------------------------------------
 frame();
 const startChar = CHARACTERS[settings.character] || CHARACTERS.xbot;
-loadCharacter(startChar.url, startChar.name).catch((e) => { log('character failed: ' + e.message, 'err'); pill('rig', 'character failed', 'bad'); });
-initPose(settings.poseModel).catch((e) => { log('pose model failed: ' + e.message, 'err'); pill('pose', 'pose failed', 'bad'); });
-checkHQ(); setInterval(checkHQ, 10000);
-log('ready. type a motion and hit generate');
+loadCharacter(startChar.url, startChar.name).catch((e) => {
+  log('Character load failed: ' + e.message, 'err');
+  $('#pill-rig-text').textContent = 'Rig: Failed';
+});
+initPose(settings.poseModel).catch((e) => log('Pose detector init: ' + e.message, 'err'));
+checkHQ();
+fetchSystemTelemetry();
+setInterval(checkHQ, 8000);
+setInterval(fetchSystemTelemetry, 10000);
+
+log('Prompt2Rig Studio initialized and ready.');

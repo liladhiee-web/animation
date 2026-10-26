@@ -6,7 +6,9 @@
   "description": "Prompt → fast video model (H3 Max Turbo / FLUX 3 Max on fal) → GVHMR motion → live retargeting onto Mixamo characters",
   "license": "Apache-2.0",
   "scripts": {
-    "start": "node server.mjs"
+    "start": "node server.mjs",
+    "server:py": "python server.py",
+    "kaggle": "python kaggle_run.py"
   },
   "devDependencies": {
     "puppeteer-core": "^23.11.1"
