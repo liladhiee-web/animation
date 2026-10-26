@@ -188,6 +188,17 @@ const server = http.createServer(async (req, res) => {
     }
 
     // HQ pass: forward to the local GVHMR worker (hq/worker.py).
+    if (url.pathname.startsWith('/api/hq/job/')) {
+      const key = url.pathname.slice('/api/hq/job/'.length);
+      try {
+        const r = await fetch(`${HQ_URL}/api/hq/job/${key}`);
+        const text = await r.text();
+        res.writeHead(r.status, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        return res.end(text);
+      } catch {
+        return send(res, 200, { status: 'not_found' });
+      }
+    }
     if (url.pathname === '/api/hq/health') {
       try {
         const r = await fetch(`${HQ_URL}/health`, { signal: AbortSignal.timeout(2000) });

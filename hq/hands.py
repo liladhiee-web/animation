@@ -74,8 +74,11 @@ class WiLoRHands:
         from wilor_mini.pipelines.wilor_hand_pose3d_estimation_pipeline import WiLorHandPose3dEstimationPipeline
 
         root = WEIGHTS / "wilor"
-        if not (root / "pretrained_models" / "MANO_RIGHT.pkl").exists():
-            raise FileNotFoundError(f"WiLoR needs MANO_RIGHT.pkl in {root / 'pretrained_models'} (mano.is.tue.mpg.de)")
+        pretrained = root / "pretrained_models"
+        if not (pretrained / "MANO_RIGHT.pkl").exists():
+            raise FileNotFoundError(f"WiLoR needs MANO_RIGHT.pkl in {pretrained}")
+        if not (pretrained / "wilor_final.ckpt").exists():
+            raise FileNotFoundError(f"WiLoR needs wilor_final.ckpt in {pretrained}")
         # Every file is present locally, so the pipeline never reaches for its mirror repo.
         self.pipe = WiLorHandPose3dEstimationPipeline(device=torch.device("cuda"), dtype=torch.float16, verbose=False,
                                                       wilor_pretrained_dir=str(root), WILOR_MINI_REPO_ID="__offline__")

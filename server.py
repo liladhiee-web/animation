@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -226,16 +227,50 @@ def hq_health():
     }
 
 
+HQ_JOBS: dict[str, dict] = {}
+
+
 class HQProcessRequest(BaseModel):
     video_url: str
     hands: Optional[str] = None
+    poll: Optional[bool] = True
+
+
+@app.get("/api/hq/job/{key}")
+def get_hq_job(key: str):
+    """Retrieve the progress or result of an async HQ motion job."""
+    if key in HQ_JOBS:
+        job = HQ_JOBS[key]
+        if job["status"] == "running":
+            return {
+                "status": "processing",
+                "elapsed": round(time.perf_counter() - job["start_time"], 1),
+            }
+        elif job["status"] == "done":
+            return {
+                "status": "done",
+                "result": job["result"],
+                "elapsed": round(job.get("elapsed", 0), 1),
+            }
+        elif job["status"] == "error":
+            return {
+                "status": "error",
+                "error": job["error"],
+            }
+    # Check if results already saved in cache on disk
+    wm = get_worker()
+    if wm:
+        cache_dir = wm.CACHE / key
+        if (cache_dir / "input.mp4").exists() and (cache_dir / "hmr4d_results.pt").exists():
+            return {"status": "processing", "message": "finishing on disk"}
+    return {"status": "not_found"}
 
 
 @app.post("/api/hq")
 def hq_process(body: HQProcessRequest):
     """Processes video motion with GVHMR + WiLoR.
 
-    Handles both external URLs and local uploaded files (/takes/uploads/...) directly from disk.
+    Supports asynchronous background polling to avoid Cloudflare 100s proxy timeouts.
     """
     wm = get_worker()
     if wm is None:
@@ -243,12 +278,28 @@ def hq_process(body: HQProcessRequest):
 
     state = getattr(wm, "state", {})
     if state.get("pipe") is None:
-        # Submit load_pipeline if not yet running
         wm.GPU.submit(wm.load_pipeline).result()
         if state.get("pipe") is None:
             raise HTTPException(503, state.get("error") or "GVHMR not loaded on GPU")
 
-    # Intercept local /takes/ path to avoid unnecessary network fetch
+    key = hashlib.sha1(body.video_url.encode()).hexdigest()[:12]
+
+    # Return cached result immediately if job already completed
+    if key in HQ_JOBS and HQ_JOBS[key]["status"] == "done":
+        return HQ_JOBS[key]["result"]
+
+    # If already running, return 202 with processing status
+    if key in HQ_JOBS and HQ_JOBS[key]["status"] == "running":
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": "processing",
+                "key": key,
+                "elapsed": round(time.perf_counter() - HQ_JOBS[key]["start_time"], 1),
+            },
+        )
+
+    # Intercept local /takes/ path
     local_path = None
     v_url = body.video_url
     if "/takes/" in v_url or v_url.startswith("takes/"):
@@ -257,25 +308,61 @@ def hq_process(body: HQProcessRequest):
         if candidate.exists():
             local_path = candidate
 
-    # If local file exists, copy directly to cache
     if local_path and local_path.exists():
-        key = hashlib.sha1(v_url.encode()).hexdigest()[:12]
         out_dir = wm.CACHE / key
         out_dir.mkdir(parents=True, exist_ok=True)
         cached_source = out_dir / "source.mp4"
         if not cached_source.exists():
             shutil.copyfile(local_path, cached_source)
 
-    # Invoke process in worker
     process_in = wm.ProcessIn(video_url=body.video_url, hands=body.hands)
-    try:
-        return wm.process(process_in)
-    except HTTPException:
-        raise
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"GVHMR motion processing error: {e}")
+
+    # If synchronous mode requested explicitly
+    if body.poll is False:
+        try:
+            return wm.process(process_in)
+        except Exception as e:
+            raise HTTPException(500, f"GVHMR error: {e}")
+
+    # Launch in background thread for async polling
+    t0 = time.perf_counter()
+    HQ_JOBS[key] = {
+        "status": "running",
+        "start_time": t0,
+        "result": None,
+        "error": None,
+    }
+
+    def execute_job():
+        try:
+            print(f"[hq] Starting GPU motion extraction for {key}...")
+            res = wm.process(process_in)
+            HQ_JOBS[key] = {
+                "status": "done",
+                "result": res,
+                "elapsed": time.perf_counter() - t0,
+                "start_time": t0,
+            }
+            print(f"[hq] Job {key} finished successfully in {time.perf_counter() - t0:.1f}s")
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            HQ_JOBS[key] = {
+                "status": "error",
+                "error": str(e),
+                "start_time": t0,
+            }
+
+    threading.Thread(target=execute_job, daemon=True).start()
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status": "processing",
+            "key": key,
+            "message": "Motion processing in progress on GPU",
+        },
+    )
 
 
 @app.post("/api/upload")

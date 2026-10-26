@@ -269,8 +269,17 @@ def hands_method(requested: str | None) -> str | None:
     m = (requested or os.environ.get("HQ_HANDS", "auto")).lower()
     if m == "off":
         return None
+    wilor_dir = HQ / "weights" / "wilor" / "pretrained_models"
+    wilor_ready = (
+        (wilor_dir / "MANO_RIGHT.pkl").exists()
+        and (wilor_dir / "wilor_final.ckpt").exists()
+        and (wilor_dir / "detector.pt").exists()
+    )
+    mp_ready = (HQ / "weights" / "hand_landmarker.task").exists()
+    if m == "wilor":
+        return "wilor" if wilor_ready else ("mediapipe" if mp_ready else None)
     if m == "auto":
-        return "wilor" if (HQ / "weights" / "wilor" / "pretrained_models" / "MANO_RIGHT.pkl").exists() else "mediapipe"
+        return "wilor" if wilor_ready else ("mediapipe" if mp_ready else None)
     return m
 
 

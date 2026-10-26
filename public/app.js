@@ -469,21 +469,73 @@ function runHQ(take) {
 
   take.hqPromise = api('/api/hq', {
     video_url: take.videoUrl,
+    poll: true,
     ...(take.handsMethod ? { hands: take.handsMethod } : {}),
   })
-    .then((r) => {
-      take.hqRaw = r;
-      take.hq = bakeSmpl(r);
-      take.hqAt = performance.now();
-      take.hqStatus = 'done';
-      take.timings.hq = (performance.now() - t0) / 1000;
-      log(`#${take.id} HQ motion ready in ${take.timings.hq.toFixed(1)}s (${r.n} frames on ${r.device || 'GPU'})`, 'hq');
+    .then((resp) => {
+      // If immediate finished result returned (e.g. cached)
+      if (resp.n && resp.fps) {
+        handleHQResult(take, resp, t0);
+        return;
+      }
+      // If async job returned for polling (prevents Cloudflare 100s timeout on long clips!)
+      if (resp.status === 'processing' && resp.key) {
+        return pollHQJob(take, resp.key, t0);
+      }
+      throw new Error(resp.message || 'Unexpected response from HQ worker');
     })
     .catch((e) => {
       take.hqStatus = 'error';
+      banner('');
       log(`#${take.id} HQ motion failed: ${e.message}`, 'err');
-    })
-    .finally(renderTakes);
+      renderTakes();
+    });
+}
+
+function pollHQJob(take, key, t0) {
+  return new Promise((resolve, reject) => {
+    banner(`#${take.id}: Processing HQ motion on GPU...`);
+    const interval = setInterval(async () => {
+      try {
+        const job = await api(`/api/hq/job/${key}`);
+        if (job.status === 'processing') {
+          const sec = job.elapsed ? `${job.elapsed}s` : `${((performance.now() - t0) / 1000).toFixed(0)}s`;
+          banner(`#${take.id}: Processing HQ motion on GPU (${sec})...`);
+          take.hqStatus = 'running';
+          renderTakes();
+        } else if (job.status === 'done' && job.result) {
+          clearInterval(interval);
+          handleHQResult(take, job.result, t0);
+          resolve(job.result);
+        } else if (job.status === 'error') {
+          clearInterval(interval);
+          take.hqStatus = 'error';
+          banner('');
+          log(`#${take.id} HQ motion failed: ${job.error}`, 'err');
+          renderTakes();
+          reject(new Error(job.error));
+        }
+      } catch (err) {
+        // Network jitter or temporary connection reset: keep polling!
+      }
+    }, 2000);
+  });
+}
+
+function handleHQResult(take, r, t0) {
+  take.hqRaw = r;
+  take.hq = bakeSmpl(r);
+  take.hqAt = performance.now();
+  take.hqStatus = 'done';
+  take.timings.hq = (performance.now() - t0) / 1000;
+  banner('');
+  const handsTag = r.hands?.method ? ` · hands: ${r.hands.method}` : '';
+  log(`#${take.id} HQ motion ready in ${take.timings.hq.toFixed(1)}s (${r.n} frames on ${r.device || 'GPU'}${handsTag})`, 'hq');
+  renderTakes();
+  if (take.awaitingHq) {
+    take.awaitingHq = false;
+    enqueue(take);
+  }
 }
 
 const _kp = Array.from({ length: 21 }, () => new THREE.Vector3());
