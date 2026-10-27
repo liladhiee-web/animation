@@ -446,8 +446,12 @@ export function blendSnapshots(qa, pa, qb, pb, a, out) {
   return out;
 }
 
-/** Bake a Track into a THREE.AnimationClip (local quats + hips local position). */
-export function trackToClip(a, b, name = 'Take') {
+/**
+ * Bake a Track into a THREE.AnimationClip (local quats + hips local position).
+ * `opts.inPlace`: pin the hips' world X/Z to the first frame so the character animates
+ * at the origin (Mixamo-style "In Place"), while keeping the vertical Y motion.
+ */
+export function trackToClip(a, b, name = 'Take', opts = {}) {
   const rig = a?.order ? a : b;
   const track = a?.times ? a : b;
   if (!track?.times || !rig?.order) {
@@ -465,7 +469,12 @@ export function trackToClip(a, b, name = 'Take') {
   if (rig.hips.parent) {
     parentInv.copy(rig.hips.parent.matrixWorld).invert();
   }
-  track.p.forEach((p, f) => _v1.fromArray(p).applyMatrix4(parentInv).toArray(pos, f * 3));
+  const base = opts.inPlace ? track.p[0] : null;
+  track.p.forEach((p, f) => {
+    if (base) _v1.set(base[0], p[1], base[2]);
+    else _v1.fromArray(p);
+    _v1.applyMatrix4(parentInv).toArray(pos, f * 3);
+  });
   tracks.push(new THREE.VectorKeyframeTrack(`${rig.hips.name}.position`, times, pos));
   return new THREE.AnimationClip(name, times[times.length - 1] || 0, tracks);
 }

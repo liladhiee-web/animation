@@ -76,7 +76,7 @@ const videoPrompt = (action, fromImage) => fromImage
 // ---- Settings ------------------------------------------------------------------
 const DEFAULTS = {
   stream: false, source: 'performer', chain: false, duration: 5, resolution: '480P', hq: true, waitHq: false,
-  rootMotion: true, poseModel: 'heavy', smoothing: 0.5, showSkel: true, orientation: 'portrait', performerUrls: {},
+  rootMotion: true, inPlace: false, poseModel: 'heavy', smoothing: 0.5, showSkel: true, orientation: 'portrait', performerUrls: {},
   character: 'xbot', videoModel: 'h3', swap: false, cinematic: false, hands: true, falKey: '', lightingTheme: 'cyber',
 };
 const settings = (() => { try { return { ...DEFAULTS, ...JSON.parse(localStorage.getItem('p2r') || '{}') }; } catch { return { ...DEFAULTS }; } })();
@@ -792,6 +792,13 @@ function tick() {
         const h = rig.hipsWorld().add(current.rootOffset);
         rig.setHipsWorld(h);
       }
+      // In Place Animation (Mixamo-style): keep vertical bounce, strip root travel in X/Z.
+      if (settings.inPlace) {
+        const h = rig.hipsWorld();
+        h.x = rig.rest.Hips.wp.x;
+        h.z = rig.rest.Hips.wp.z;
+        rig.setHipsWorld(h);
+      }
       rig.hipsWorld(lastRenderedHips);
     }
 
@@ -831,7 +838,7 @@ async function exportTakeGlb(take) {
     return;
   }
 
-  const clip = trackToClip(rig, track, take.prompt);
+  const clip = trackToClip(rig, track, take.prompt, { inPlace: settings.inPlace });
   const root = onStage ? cast[onStage].root : model;
   const prevPose = rig.snapshot();
   rig.reset();
@@ -1110,6 +1117,9 @@ bindSetting('hq', 'checked');
 bindSetting('hands', 'checked', () => { if (rig) for (const t of takes) if (t.hqRaw) t.hq = bakeSmpl(t.hqRaw); });
 bindSetting('waitHq', 'checked');
 bindSetting('rootMotion', 'checked');
+bindSetting('inPlace', 'checked', (on) => {
+  if (on) log('In Place Animation ON — root travel stripped in preview and GLB export');
+});
 bindSetting('showSkel', 'checked');
 bindSetting('smoothing', 'value', setSmoothing);
 bindSetting('poseModel', 'value', (v) => { if (vision) initPose(v); });
